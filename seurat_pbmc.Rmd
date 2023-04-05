@@ -1,0 +1,259 @@
+---
+title: "Single Cell Analysis with Seurat"
+author: "Pragati Upadhyay"
+date: "2023-03-26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warnings=FALSE)
+```
+To study cell to cell variation within a population, we perform single cell analysis. Single-cell analysis is of critical importance in revealing population heterogeneity, identifying minority sub-populations of interest, as well as discovering unique characteristics of individual cells.
+
+I will be following the tutorial from Satija Lab which can be found [here](https://satijalab.org/seurat/articles/pbmc3k_tutorial.html)
+
+```{r}
+#Loading the required libraries 
+library(dplyr)
+library(Seurat)
+library(patchwork)
+```
+The dataset is of Peripheral Blood Mononuclear Cells (PBMC) from 10X Genomics. It has 2,700 single cells that were sequenced on the Illumina NextSeq 500. 
+
+
+**Setup the Seurat Object**
+
+```{r}
+# Load the PBMC dataset
+pbmc.data <- Read10X(data.dir ="filtered_gene_bc_matrices/hg19/")
+
+# Initialize the Seurat object with the raw (non-normalized data).
+pbmc <- CreateSeuratObject(counts = pbmc.data, project = "pbmc3k", min.cells = 3, min.features = 200)
+pbmc
+```
+Now this pbmc variable is our Seurat object. It has 13714 features across 2700 samples. 
+
+**Standard pre-processing workflow**
+
+These represent the selection and filtration of cells based on QC metrics, data normalization and scaling, and the detection of highly variable features.
+
+There might be a chance that during sequencing, cells die thus we can get a lot of contamination in the form of mitochondrial genes, so to remove them and to remove low quality cells the Quality Control is performed. 
+
+
+**QC and selecting cells for further analysis**
+
+```{r}
+# The [[ operator can add columns to object metadata. This is a great place to stash QC stats
+pbmc[["percent.mt"]] <- PercentageFeatureSet(pbmc, pattern = "^MT-")
+
+# Show QC metrics for the first 5 cells
+head(pbmc@meta.data, 5)
+```
+The column percent.mt shows us the % of mitochondrial genes, nCount_RNA is the total number of molecules detected within a cell, and nFeature_RNA is the number of genes detected in each cell. Low nFeature_RNA for a cell indicates that it may be dead/dying or an empty droplet. High nCount_RNA and/or nFeature_RNA indicates that the "cell" may in fact be a doublet. 
+
+
+**Visualize QC data matrices** 
+
+```{r}
+# Visualize QC metrics as a violin plot
+VlnPlot(pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+```{r}
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used
+# for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+
+plot1 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+plot1 + plot2
+```
+After having a look at the scatter plot and the violin plot, it can be seen that there are not many outliers. Thus we can subset the values that range from 200 to 2500 counts and mitochondrial DNA less than 5%
+
+**Subset the data**
+
+```{r}
+pbmc1 <- subset(pbmc, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+```
+
+**Normalizing the data**
+
+After removing unwanted cells from the dataset, the next step is to normalize the data.
+```{r}
+pbmc2 <- NormalizeData(pbmc1, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+**Identification of highly variable features (feature selection)**
+
+To find the genes that are highly expressed, we use the function `FindVariableFeatures()`. These cells exhibit high cell-to-cell variation in the dataset, identifying them will help in downstream analysis.
+```{r}
+pbmc3 <- FindVariableFeatures(pbmc2, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(pbmc3), 10)
+
+# plot variable features with labels
+plot1 <- VariableFeaturePlot(pbmc3)
+
+# plot variable features without labels
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+
+# Combining the plots
+plot1 + plot2
+```
+
+```{r}
+x <- VariableFeatures(pbmc3)
+head(x)
+```
+There are 2000 variable features in this dataset
+
+
+**Scaling the data**
+
+To give equal weight to our data points, we perform scaling. The function `ScaleData()` is used to perform scaling.
+
+```{r}
+all.genes <- rownames(pbmc3)
+pbmc4 <- ScaleData(pbmc3, features = all.genes)
+```
+
+
+**Perform linear dimensional reduction**
+
+To reduce the dimensionality of this complex data, we perform PCA. 
+```{r}
+pbmc5 <- RunPCA(pbmc4, features = VariableFeatures(object = pbmc4))
+
+# Examine and visualize PCA results a few different ways
+print(pbmc5[["pca"]], dims = 1:5, nfeatures = 5)
+```
+
+Visualizing the components with different graphs
+```{r}
+VizDimLoadings(pbmc5, dims = 1:2, reduction = "pca")
+
+DimPlot(pbmc5, reduction = "pca")
+
+DimHeatmap(pbmc5, dims = 1, cells = 500, balanced = TRUE)
+```
+
+
+Generating an elbow plot to determine how many PCs we should consider
+```{r}
+ElbowPlot(pbmc5)
+```
+
+We can observe an ‘elbow’ around PC9-10, suggesting that the majority of true signal is captured in the first 10 PCs.
+
+**Cluster the cells**
+
+We are finding the nearest neighbors with `FindNeighbors()` function and to find the clusters of the cells that can be grouped together, `FindClusters()` function is used.
+```{r}
+pbmc6 <- FindNeighbors(pbmc5, dims = 1:10)
+pbmc7 <- FindClusters(pbmc6, resolution = 0.5)
+```
+
+Look at cluster IDs of the first 5 features
+```{r}
+head(Idents(pbmc7), 5)
+```
+
+**Run non-linear dimensional reduction (UMAP/tSNE)**
+
+Placing the similar cells together in a low dimensional space with UMAP
+```{r}
+pbmc8 <- RunUMAP(pbmc7, dims = 1:10)
+
+DimPlot(pbmc8, reduction = "umap")
+```
+
+**Finding differentially expressed features (cluster biomarkers)**
+
+Next step is to find the Biomarkers that will help us in the identification of cell type. This is accomplished with `FindMarkers()`. 
+```{r}
+# find all markers of cluster 2
+cluster2.markers <- FindMarkers(pbmc8, ident.1 = 2, min.pct = 0.25)
+head(cluster2.markers, n = 5)
+```
+We can see the first 5 markers of cluster type 2 here.
+
+```{r}
+# find all markers distinguishing cluster 5 from clusters 0 and 3
+cluster5.markers <- FindMarkers(pbmc8, ident.1 = 5, ident.2 = c(0, 3), min.pct = 0.25)
+head(cluster5.markers, n = 5)
+```
+Here we can see 5 markers that can help us to distinguish cluster 5 from cluster 0 and 3. 
+
+Now we will find the markers for each of the clusters
+```{r}
+# find markers for every cluster compared to all remaining cells, report only the positive
+# ones
+pbmc.markers <- FindAllMarkers(pbmc8, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+pbmc.markers %>%
+    group_by(cluster) %>%
+    slice_max(n = 2, order_by = avg_log2FC)
+```
+
+We can see the 2 biomarkers for each of the clusters here. This can help us to find out the cell type pertaining to the cluster. 
+
+Having a look at the cluster 0 markers
+```{r}
+cluster0.markers <- FindMarkers(pbmc8, ident.1 = 0, logfc.threshold = 0.25, test.use = "roc", only.pos = TRUE)
+head(cluster0.markers, n=20)
+```
+
+```{r}
+VlnPlot(pbmc8, features = c("MS4A1", "CD79A"))
+```
+
+This violin plot shows expression probability distributions across clusters. It can be seen that the "MS4A1" and "CD79A" can be seen in cluster 3
+
+```{r}
+# you can plot raw counts as well
+VlnPlot(pbmc8, features = c("NKG7", "PF4"), slot = "counts", log = TRUE)
+```
+
+```{r}
+FeaturePlot(pbmc8, features = c("MS4A1", "GNLY", "CD3E", "CD14", "FCER1A", "FCGR3A", "LYZ", "PPBP",
+    "CD8A"))
+```
+
+This feature plots shows us the position of these biomarkers in different clusters 
+
+Plotting top 20 markers with the heatmap
+```{r}
+pbmc.markers %>%
+    group_by(cluster) %>%
+    top_n(n = 10, wt = avg_log2FC) -> top10
+DoHeatmap(pbmc8, features = top10$gene) + NoLegend()
+```
+
+
+**Assigning cell type identity to clusters**
+This tutorial has used the canonical markers to easily match the unbiased clustering to known cell types
+```{r}
+# Giving the cell type identities to the clusters 
+new.cluster.ids <- c("Naive CD4 T", "CD14+ Mono", "Memory CD4 T", "B", "CD8 T", "FCGR3A+ Mono",
+    "NK", "DC", "Platelet")
+names(new.cluster.ids) <- levels(pbmc8)
+pbmc9 <- RenameIdents(pbmc8, new.cluster.ids)
+DimPlot(pbmc9, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+```
+
+\n It can be seen that the cells of cluster 0 are "Naive CD4 T" cells.\n
+Cells from cluster 1 are "CD14+ Mono" \n
+Cells from cluster 2 are "Memory CD4 T" \n
+Cells from cluster 3 are "B" \n
+Cells from cluster 4 are "CD8 T" \n
+Cells from cluster 5 are "FCGR3A+ Mono" \n
+Cells from cluster 6 are "NK" \n
+Cells from cluster 7 are "DC" \n
+Cells from cluster 8 are "Platelet" \n
+
+
+Saving the file into the RDS format to contain the final results
+```{r}
+saveRDS(pbmc9, file = "pbmc3k_final.rds")
+```
+
